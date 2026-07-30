@@ -93,6 +93,46 @@ struct ClientState {
     draw_host_cursor: bool,
 }
 
+/// How a direct-attach client names the terminal it wants.
+#[cfg(unix)]
+enum AttachRequest {
+    /// Terminal id already resolved by the caller through the JSON API.
+    TerminalId { terminal_id: String, takeover: bool },
+    /// Fuzzy target (agent name, pane id, terminal id) resolved by the server.
+    Target { target: String, takeover: bool },
+}
+
+/// Direct attach is Unix raw-byte input only, so a Windows client can never
+/// build an attach request. Keeping the type uninhabited lets the shared client
+/// loop stay platform-neutral while making that impossible by construction.
+#[cfg(windows)]
+enum AttachRequest {}
+
+#[cfg(unix)]
+impl AttachRequest {
+    fn into_client_message(self) -> ClientMessage {
+        match self {
+            Self::TerminalId {
+                terminal_id,
+                takeover,
+            } => ClientMessage::AttachTerminal {
+                terminal_id,
+                takeover,
+            },
+            Self::Target { target, takeover } => {
+                ClientMessage::ControlTerminal { target, takeover }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl AttachRequest {
+    fn into_client_message(self) -> ClientMessage {
+        match self {}
+    }
+}
+
 #[derive(Debug, Default)]
 #[cfg(windows)]
 struct AttachEscapeState;
@@ -838,15 +878,44 @@ pub fn run_client() -> io::Result<()> {
 pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()> {
     run_client_with_mode(
         RenderEncoding::TerminalAnsi,
-        Some((terminal_id, takeover)),
+        Some(AttachRequest::TerminalId {
+            terminal_id,
+            takeover,
+        }),
         Some(AttachEscapeState::default()),
         "attaching to terminal",
+    )
+}
+
+/// Runs a direct attach client that resolves its target on the server.
+///
+/// Unlike [`run_terminal_attach`], this does not need the JSON API socket to
+/// turn a fuzzy target (agent name, pane id, terminal id) into a terminal id.
+/// `herdr --remote --attach` uses this because it bridges only the client
+/// socket, not the API socket.
+#[cfg(unix)]
+pub fn run_target_attach(target: String, takeover: bool) -> io::Result<()> {
+    run_client_with_mode(
+        RenderEncoding::TerminalAnsi,
+        Some(AttachRequest::Target { target, takeover }),
+        Some(AttachEscapeState::default()),
+        "attaching to terminal target",
     )
 }
 
 /// Direct terminal attach is Unix raw-byte input only until Windows gets a semantic attach path.
 #[cfg(windows)]
 pub fn run_terminal_attach(_terminal_id: String, _takeover: bool) -> io::Result<()> {
+    debug_assert!(!crate::platform::capabilities().direct_terminal_attach);
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "direct terminal attach is not supported on Windows yet",
+    ))
+}
+
+/// Server-resolved direct attach follows the same Windows limitation as [`run_terminal_attach`].
+#[cfg(windows)]
+pub fn run_target_attach(_target: String, _takeover: bool) -> io::Result<()> {
     debug_assert!(!crate::platform::capabilities().direct_terminal_attach);
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -1113,7 +1182,7 @@ fn terminal_control_command_from_json(raw: &str) -> Result<ClientMessage, String
 
 fn run_client_with_mode(
     requested_encoding: RenderEncoding,
-    attach_request: Option<(String, bool)>,
+    attach_request: Option<AttachRequest>,
     attach_escape: Option<AttachEscapeState>,
     log_message: &'static str,
 ) -> io::Result<()> {
@@ -1177,11 +1246,8 @@ fn run_client_with_mode(
         }
     };
 
-    if let Some((terminal_id, takeover)) = attach_request {
-        let attach = ClientMessage::AttachTerminal {
-            terminal_id,
-            takeover,
-        };
+    if let Some(attach_request) = attach_request {
+        let attach = attach_request.into_client_message();
         if let Err(err) = write_to_server(&mut stream, &attach) {
             eprintln!("herdr: failed to request terminal attach: {err}");
             std::process::exit(1);

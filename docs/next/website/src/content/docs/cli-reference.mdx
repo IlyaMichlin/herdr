@@ -15,6 +15,8 @@ herdr --session work          # launch or attach to a named session
 herdr --remote workbox        # attach through SSH, using local keybindings
 herdr --remote workbox --remote-keybindings server
 herdr --remote workbox --handoff
+herdr --remote workbox --attach reviewer          # attach one remote terminal, no app UI
+herdr --remote workbox --attach w1:p1 --takeover  # replace the current attach owner
 herdr --no-session            # single-process escape hatch
 herdr --default-config        # print default config
 herdr update                  # download and install from the configured channel

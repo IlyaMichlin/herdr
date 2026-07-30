@@ -513,6 +513,30 @@ fn main() -> io::Result<()> {
         return client::run_client();
     }
 
+    // Hidden direct-attach client mode: attach to one terminal on an existing
+    // server, resolving the target server-side. `herdr --remote --attach` spawns
+    // this because it bridges only the client socket, not the JSON API socket.
+    if args.get(1).map(|s| s.as_str()) == Some("client-attach") {
+        let loaded_config = config::Config::load();
+        exit_if_nested_disabled(&loaded_config.config);
+        let Some(target) = args.get(2) else {
+            eprintln!("usage: herdr client-attach <target> [--takeover]");
+            std::process::exit(2);
+        };
+        let mut takeover = false;
+        for arg in &args[3..] {
+            match arg.as_str() {
+                "--takeover" => takeover = true,
+                other => {
+                    eprintln!("unknown option: {other}");
+                    eprintln!("usage: herdr client-attach <target> [--takeover]");
+                    std::process::exit(2);
+                }
+            }
+        }
+        return client::run_target_attach(target.clone(), takeover);
+    }
+
     if args.get(1).map(|s| s.as_str()) == Some("update") {
         let options = match update::parse_self_update_args(&args[2..]) {
             Ok(options) => options,
@@ -639,6 +663,9 @@ fn main() -> io::Result<()> {
         println!("  --remote <target>   Attach through SSH to a remote Herdr server");
         println!("  --remote-keybindings <local|server>");
         println!("                      Keybindings for --remote app attach (default: local)");
+        println!("  --attach <target>   With --remote, attach directly to one remote agent,");
+        println!("                      pane, or terminal instead of the full app UI");
+        println!("  --takeover          With --attach, replace an existing attached client");
         println!("  --handoff           Opt into live handoff for update or remote attach");
         println!("  --default-config    Print default configuration and exit");
         println!("  --skill             Print the agent skill file and exit");
@@ -674,6 +701,8 @@ fn main() -> io::Result<()> {
         "--session",
         "--remote",
         "--remote-keybindings",
+        "--attach",
+        "--takeover",
         "--version",
         "-V",
         "--default-config",
@@ -692,6 +721,7 @@ fn main() -> io::Result<()> {
             && ![
                 "server",
                 "client",
+                "client-attach",
                 "remote-client-bridge",
                 "update",
                 "status",
