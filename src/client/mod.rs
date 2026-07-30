@@ -57,7 +57,7 @@ use transport::*;
 
 #[cfg(test)]
 pub(crate) use shell::{ClientShellConfig, ClientShellState};
-pub use startup::{run_client, run_terminal_attach};
+pub use startup::{run_client, run_target_attach, run_terminal_attach};
 pub use terminal_sessions::{run_terminal_session_control, run_terminal_session_observe};
 
 #[cfg(not(windows))]
@@ -172,8 +172,48 @@ fn negotiated_surface_decoder(
     (reuse || delta || scroll).then(|| protocol::surface_reuse::Decoder::new(delta, scroll))
 }
 
+/// How a direct-attach client names the terminal it wants.
+#[cfg(unix)]
+enum AttachRequest {
+    /// Terminal id already resolved by the caller through the JSON API.
+    TerminalId { terminal_id: String, takeover: bool },
+    /// Fuzzy target (agent name, pane id, terminal id) resolved by the server.
+    Target { target: String, takeover: bool },
+}
+
+/// Direct attach is Unix raw-byte input only, so a Windows client can never
+/// build an attach request. Keeping the type uninhabited lets the shared client
+/// loop stay platform-neutral while making that impossible by construction.
+#[cfg(windows)]
+enum AttachRequest {}
+
+#[cfg(unix)]
+impl AttachRequest {
+    fn into_client_message(self) -> ClientMessage {
+        match self {
+            Self::TerminalId {
+                terminal_id,
+                takeover,
+            } => ClientMessage::AttachTerminal {
+                terminal_id,
+                takeover,
+            },
+            Self::Target { target, takeover } => {
+                ClientMessage::ControlTerminal { target, takeover }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl AttachRequest {
+    fn into_client_message(self) -> ClientMessage {
+        match self {}
+    }
+}
+
 fn run_client_with_mode(
-    attach_request: Option<(String, bool)>,
+    attach_request: Option<AttachRequest>,
     attach_escape: Option<AttachEscapeState>,
     log_message: &'static str,
 ) -> io::Result<()> {
@@ -311,14 +351,8 @@ fn run_client_with_mode(
                     "Local needs a server update before it can participate in multi-machine viewing",
                 ));
             }
-            if let Some((terminal_id, takeover)) = attach_request {
-                write_to_server(
-                    &mut stream,
-                    &ClientMessage::AttachTerminal {
-                        terminal_id,
-                        takeover,
-                    },
-                )?;
+            if let Some(attach_request) = attach_request {
+                write_to_server(&mut stream, &attach_request.into_client_message())?;
             }
             Ok((stream, handshake))
         })

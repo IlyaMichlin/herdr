@@ -138,6 +138,34 @@ Only one writable direct attach client owns input and resize for a terminal. Use
 herdr terminal attach term_abc123 --takeover
 ```
 
+### Direct attach over SSH
+
+Add `--attach` to `--remote` to open one remote terminal directly instead of the
+full app UI:
+
+```bash
+herdr --remote workbox --attach reviewer
+herdr --remote workbox --attach w1:p1 --takeover
+```
+
+The target is an agent name, pane ID, or terminal ID, and the remote server
+resolves it. This runs the same remote setup as a full `--remote` attach, so it
+still checks the remote platform, reuses or installs a matching remote binary,
+and verifies the remote server protocol before attaching.
+
+Compared with `ssh -t workbox 'herdr agent attach reviewer'`, the client runs on
+your local machine. Local desktop features such as image clipboard paste still
+bridge into the remote pane, and a network drop restores your local terminal
+modes instead of leaving it in mouse-reporting mode.
+
+Direct attach sends raw input to the remote terminal, so Herdr never interprets
+those keys and `--remote-keybindings` does not apply. Detach with `ctrl+b q`.
+
+Attaching resizes the remote terminal to your local terminal size for as long as
+the attach lasts. If nobody else is attached to that session, the pane keeps the
+attach size after you detach, so size your terminal to match the pane when the
+remote layout matters.
+
 For third-party bridges that only need rendered terminal bytes, use a read-only
 terminal session observer:
 

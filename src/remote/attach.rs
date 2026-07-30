@@ -64,6 +64,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         &session_name,
         remote.keybindings,
         remote.live_handoff,
+        remote.attach.as_ref(),
     );
     let manage_ssh_config = crate::config::Config::load()
         .config
@@ -103,6 +104,7 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
         remote.keybindings,
         &remote.target,
         &session_name,
+        remote.attach.as_ref(),
     )
 }
 
@@ -2965,16 +2967,26 @@ fn reattach_command(
     session_name: &str,
     keybindings: RemoteKeybindings,
     live_handoff: bool,
+    attach: Option<&RemoteAttach>,
 ) -> String {
     let program = crate::platform::remote_reattach_program(program);
     let target = crate::platform::remote_reattach_argument(target);
     let mut command = format!("{program} --remote {target}");
-    if keybindings != RemoteKeybindings::Local {
+    // Keybindings are irrelevant for direct attach: input goes straight to the
+    // PTY, so herdr never interprets the keys.
+    if keybindings != RemoteKeybindings::Local && attach.is_none() {
         command.push_str(" --remote-keybindings ");
         command.push_str(keybindings.as_str());
     }
     if live_handoff {
         command.push_str(" --handoff");
+    }
+    if let Some(attach) = attach {
+        command.push_str(" --attach ");
+        command.push_str(&crate::platform::remote_reattach_argument(&attach.target));
+        if attach.takeover {
+            command.push_str(" --takeover");
+        }
     }
     if session_name != crate::session::DEFAULT_SESSION_NAME {
         command.push_str(" --session ");
@@ -3580,15 +3592,35 @@ fn run_client_process(
     keybindings: RemoteKeybindings,
     target: &str,
     session: &str,
+    attach: Option<&RemoteAttach>,
 ) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
-    command.arg("client");
+    match attach {
+        Some(attach) => {
+            command.arg("client-attach").arg(&attach.target);
+            if attach.takeover {
+                command.arg("--takeover");
+            }
+        }
+        None => {
+            command.arg("client");
+        }
+    }
+    // Direct attach forwards raw bytes to the remote PTY, so it never asks the
+    // server to apply this client's keybindings. Keep the env var set (it flags
+    // the process as a remote client for clipboard bridging and the longer
+    // handshake timeout) but always request the server profile.
+    let requested_keybindings = if attach.is_some() {
+        RemoteKeybindings::Server
+    } else {
+        keybindings
+    };
     configure_remote_client_environment(
         &mut command,
         local_socket,
         reattach_command,
-        keybindings,
+        requested_keybindings,
         target,
         session,
     )?;
@@ -4658,6 +4690,162 @@ mod tests {
     }
 
     #[test]
+    fn extract_remote_args_passes_subcommand_flags_through_untouched() {
+        // Regression: this parser used to strip `--takeover` (and `--attach`)
+        // from subcommand argv, so `client-attach <target> --takeover` failed
+        // with "--takeover requires --remote --attach" before the subcommand
+        // ever saw the flag.
+        let args = vec![
+            "herdr".into(),
+            "client-attach".into(),
+            "w1:p1".into(),
+            "--takeover".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(
+            cleaned,
+            vec!["herdr", "client-attach", "w1:p1", "--takeover"]
+        );
+        assert_eq!(remote, None);
+    }
+
+    #[test]
+    fn extract_remote_args_leaves_session_subcommand_attach_alone() {
+        let args = vec![
+            "herdr".into(),
+            "session".into(),
+            "attach".into(),
+            "work".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(cleaned, vec!["herdr", "session", "attach", "work"]);
+        assert_eq!(remote, None);
+    }
+
+    #[test]
+    fn extract_remote_args_accepts_attach_target() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--attach".into(),
+            "lza-cc".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(cleaned, vec!["herdr"]);
+        let attach = remote.unwrap().attach.unwrap();
+        assert_eq!(attach.target, "lza-cc");
+        assert!(!attach.takeover);
+    }
+
+    #[test]
+    fn extract_remote_args_accepts_attach_equals_form_with_takeover() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--attach=w1:p1".into(),
+            "--takeover".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(cleaned, vec!["herdr"]);
+        let attach = remote.unwrap().attach.unwrap();
+        assert_eq!(attach.target, "w1:p1");
+        assert!(attach.takeover);
+    }
+
+    #[test]
+    fn extract_remote_args_defaults_to_app_attach_without_attach_flag() {
+        let args = vec!["herdr".into(), "--remote".into(), "dev".into()];
+        let remote = extract_remote_args(&args).unwrap().1.unwrap();
+        assert_eq!(remote.attach, None);
+    }
+
+    #[test]
+    fn extract_remote_args_rejects_attach_without_remote() {
+        let args = vec!["herdr".into(), "--attach".into(), "lza-cc".into()];
+        assert_eq!(
+            extract_remote_args(&args),
+            Err("--attach requires --remote".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_remote_args_rejects_takeover_without_attach() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--takeover".into(),
+        ];
+        assert_eq!(
+            extract_remote_args(&args),
+            Err("--takeover requires --attach".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_remote_args_rejects_duplicate_attach() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--attach".into(),
+            "a".into(),
+            "--attach".into(),
+            "b".into(),
+        ];
+        assert_eq!(
+            extract_remote_args(&args),
+            Err("--attach can only be specified once".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_remote_args_rejects_option_like_attach_target() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--attach".into(),
+            "--takeover".into(),
+        ];
+        assert_eq!(
+            extract_remote_args(&args),
+            Err("--attach target must not start with '-'".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_remote_args_requires_attach_value() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--attach".into(),
+        ];
+        assert_eq!(
+            extract_remote_args(&args),
+            Err("missing value for --attach".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_remote_args_preserves_child_attach_options_after_separator() {
+        let args = vec![
+            "herdr".into(),
+            "--remote".into(),
+            "dev".into(),
+            "--".into(),
+            "--attach".into(),
+            "inner".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(cleaned, vec!["herdr", "--", "--attach", "inner"]);
+        assert_eq!(remote.unwrap().attach, None);
+    }
+
+    #[test]
     fn extract_remote_args_removes_space_form() {
         let args = vec![
             "herdr".into(),
@@ -5448,6 +5636,7 @@ function Get-Process {
                 "work",
                 RemoteKeybindings::Local,
                 false,
+                None,
             ),
             "target/release/herdr --remote user@host --session work"
         );
@@ -5458,6 +5647,7 @@ function Get-Process {
                 crate::session::DEFAULT_SESSION_NAME,
                 RemoteKeybindings::Local,
                 false,
+                None,
             ),
             "herdr --remote 'host name'"
         );
@@ -5468,6 +5658,7 @@ function Get-Process {
                 crate::session::DEFAULT_SESSION_NAME,
                 RemoteKeybindings::Server,
                 false,
+                None,
             ),
             "herdr --remote host --remote-keybindings server"
         );
@@ -5478,8 +5669,63 @@ function Get-Process {
                 crate::session::DEFAULT_SESSION_NAME,
                 RemoteKeybindings::Local,
                 true,
+                None,
             ),
             "herdr --remote host --handoff"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reattach_command_includes_attach_target() {
+        assert_eq!(
+            reattach_command(
+                "herdr",
+                "host",
+                crate::session::DEFAULT_SESSION_NAME,
+                RemoteKeybindings::Local,
+                false,
+                Some(&RemoteAttach {
+                    target: "lza-cc".to_string(),
+                    takeover: false,
+                }),
+            ),
+            "herdr --remote host --attach lza-cc"
+        );
+        assert_eq!(
+            reattach_command(
+                "herdr",
+                "host",
+                "work",
+                RemoteKeybindings::Local,
+                false,
+                Some(&RemoteAttach {
+                    target: "my agent".to_string(),
+                    takeover: true,
+                }),
+            ),
+            "herdr --remote host --attach 'my agent' --takeover --session work"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reattach_command_omits_keybindings_for_attach() {
+        // Direct attach forwards raw bytes to the PTY, so the keybinding
+        // profile is never consulted and must not appear in the hint.
+        assert_eq!(
+            reattach_command(
+                "herdr",
+                "host",
+                crate::session::DEFAULT_SESSION_NAME,
+                RemoteKeybindings::Server,
+                false,
+                Some(&RemoteAttach {
+                    target: "lza-cc".to_string(),
+                    takeover: false,
+                }),
+            ),
+            "herdr --remote host --attach lza-cc"
         );
     }
 
@@ -5494,6 +5740,7 @@ function Get-Process {
                 "work'name",
                 RemoteKeybindings::Local,
                 false,
+                None,
             ),
             format!(
                 "& '{}' --remote 'host''name' --session 'work''name'",
