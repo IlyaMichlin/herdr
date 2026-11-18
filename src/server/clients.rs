@@ -169,6 +169,8 @@ pub(crate) struct ClientConnection {
     pub(crate) host_sgr_pixels_active: Option<bool>,
     /// Last keyboard protocol state sent to a directly attached terminal client.
     pub(crate) host_keyboard_protocol_active: Option<(u16, u8)>,
+    /// Last agent status sent to a directly attached terminal client.
+    pub(crate) host_agent_status_sent: Option<crate::protocol::endpoint::DirectTerminalAgentStatus>,
     /// Presses forwarded by this shell that need release on abrupt teardown.
     shell_held_inputs: HashMap<ClientShellPressId, ClientShellHeldInput>,
     /// Temporary files staged from this client's local clipboard image pastes.
@@ -243,6 +245,7 @@ impl ClientConnection {
             host_mouse_capture_active: None,
             host_sgr_pixels_active: None,
             host_keyboard_protocol_active: None,
+            host_agent_status_sent: None,
             shell_held_inputs: HashMap::new(),
             staged_clipboard_files: Vec::new(),
             shell_location: None,

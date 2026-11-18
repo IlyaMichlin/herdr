@@ -31,6 +31,52 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+/// Agent status of the terminal a direct-attach client is attached to.
+///
+/// Direct-attach clients never receive the shell snapshot, so this optional
+/// control is their only view of agent state. Older clients ignore it as an
+/// unknown named control, and older servers simply never send it.
+pub const DIRECT_TERMINAL_AGENT_STATUS_KIND: &str = "terminal.agent-status.v1";
+
+/// Effective agent state carried by [`DIRECT_TERMINAL_AGENT_STATUS_KIND`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectTerminalAgentState {
+    Idle,
+    Working,
+    Blocked,
+    /// No recognized agent, or a state this client does not understand.
+    #[serde(other)]
+    Unknown,
+}
+
+impl From<crate::detect::AgentState> for DirectTerminalAgentState {
+    fn from(state: crate::detect::AgentState) -> Self {
+        match state {
+            crate::detect::AgentState::Idle => Self::Idle,
+            crate::detect::AgentState::Working => Self::Working,
+            crate::detect::AgentState::Blocked => Self::Blocked,
+            crate::detect::AgentState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectTerminalAgentStatus {
+    /// Effective agent label such as `claude`, or `None` for a plain terminal.
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub state: DirectTerminalAgentState,
+}
+
+pub fn direct_terminal_agent_status_message(
+    status: &DirectTerminalAgentStatus,
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: DIRECT_TERMINAL_AGENT_STATUS_KIND.into(),
+        data: serde_json::to_string(status)?,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {

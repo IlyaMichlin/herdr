@@ -27,6 +27,7 @@ mod frame_output;
 #[cfg(test)]
 mod frame_output_tests;
 mod handshake;
+mod host_agent_status;
 mod image_files;
 mod input;
 mod loop_config;
@@ -527,6 +528,13 @@ async fn run_client_loop(
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
     };
+    // Direct attach is the only client in its host terminal tab, so it mirrors
+    // the attached agent's status into host integrations such as cmux.
+    let mut host_agent_status = state
+        .attach_escape
+        .is_some()
+        .then(host_agent_status::HostAgentStatus::from_environment)
+        .flatten();
     let mut federated = endpoint_catalog.has_enabled_ssh();
     if let Some(shell) = state.shell.as_mut() {
         shell.set_host_reports_key_releases(config.host_escape_disambiguation_active);
@@ -2125,6 +2133,12 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
+                        if kind == crate::protocol::endpoint::DIRECT_TERMINAL_AGENT_STATUS_KIND {
+                            if let Some(host_agent_status) = host_agent_status.as_mut() {
+                                host_agent_status.apply_wire(&data);
+                            }
+                            continue;
+                        }
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
                             let progress = pending_activation.as_mut().map(|activation| {
                                 activation.receive_presentation_effects_ready(

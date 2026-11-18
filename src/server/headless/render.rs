@@ -283,6 +283,77 @@ impl HeadlessServer {
         }
     }
 
+    /// Streams the effective agent state of each directly attached terminal to
+    /// its client, so the client can mirror it into the host terminal (for
+    /// example a cmux sidebar). Only changes are sent.
+    pub(super) fn stream_direct_terminal_agent_status(&mut self) {
+        use crate::protocol::endpoint::{DirectTerminalAgentState, DirectTerminalAgentStatus};
+
+        let requested = self
+            .clients
+            .iter()
+            .filter_map(|(&client_id, client)| {
+                let ClientConnectionMode::TerminalAttach { terminal_id } = &client.mode else {
+                    return None;
+                };
+                client.writer.as_ref()?;
+                let status = self
+                    .terminal_id_by_string(terminal_id)
+                    .and_then(|id| self.app.state.terminals.get(&id))
+                    .map_or(
+                        DirectTerminalAgentStatus {
+                            agent: None,
+                            state: DirectTerminalAgentState::Unknown,
+                        },
+                        |terminal| DirectTerminalAgentStatus {
+                            agent: terminal.effective_agent_label().map(str::to_owned),
+                            state: terminal.state.into(),
+                        },
+                    );
+                (client.host_agent_status_sent.as_ref() != Some(&status))
+                    .then_some((client_id, status))
+            })
+            .collect::<Vec<_>>();
+
+        let mut broken_clients = Vec::new();
+        for (client_id, status) in requested {
+            let Some(client) = self.clients.get_mut(&client_id) else {
+                continue;
+            };
+            let Some(writer) = &client.writer else {
+                continue;
+            };
+            let message =
+                match crate::protocol::endpoint::direct_terminal_agent_status_message(&status) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        warn!(err = %err, "failed to encode direct terminal agent status");
+                        continue;
+                    }
+                };
+            let serialized = match Self::frame_server_message(&message) {
+                Ok(framed) => framed,
+                Err(err) => {
+                    warn!(err = %err, "failed to serialize direct terminal agent status");
+                    continue;
+                }
+            };
+            if writer.control.send(serialized).is_err() {
+                debug!(
+                    client_id,
+                    "client writer channel closed during direct terminal agent status update"
+                );
+                broken_clients.push(client_id);
+                continue;
+            }
+            client.host_agent_status_sent = Some(status);
+        }
+
+        for client_id in broken_clients {
+            self.remove_client_and_resize_if_needed(client_id);
+        }
+    }
+
     pub(super) fn has_pending_presentation_work(
         &self,
         needs_full_render: bool,

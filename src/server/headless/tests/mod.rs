@@ -6728,6 +6728,73 @@ fn client_shell_focus_promotes_and_reaches_reporting_pane() {
 }
 
 #[test]
+fn direct_terminal_streams_agent_status_changes_only() {
+    use crate::protocol::endpoint::{
+        DirectTerminalAgentState, DirectTerminalAgentStatus, DIRECT_TERMINAL_AGENT_STATUS_KIND,
+    };
+
+    with_terminal_session_test_server(|server, _other_terminal_id, terminal_id, _pane_id| {
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new_with_mode(
+                ClientConnectionMode::TerminalAttach {
+                    terminal_id: terminal_id.clone(),
+                },
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                1,
+                RenderEncoding::TerminalAnsi,
+                Some(client_tx),
+            ),
+        );
+        let read_status = |message: ServerMessage| match message {
+            ServerMessage::EndpointControl { kind, data } => {
+                assert_eq!(kind, DIRECT_TERMINAL_AGENT_STATUS_KIND);
+                serde_json::from_str::<DirectTerminalAgentStatus>(&data).expect("status payload")
+            }
+            other => panic!("expected agent status, got {other:?}"),
+        };
+
+        server.stream_direct_terminal_agent_status();
+        let initial = read_status(read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial agent status"),
+        ));
+        assert_eq!(initial.state, DirectTerminalAgentState::Unknown);
+
+        let real_terminal_id = server
+            .terminal_id_by_string(&terminal_id)
+            .expect("attached terminal");
+        let terminal = server
+            .app
+            .state
+            .terminals
+            .get_mut(&real_terminal_id)
+            .expect("attached terminal state");
+        terminal.detected_agent = Some(crate::detect::Agent::Claude);
+        terminal.state = crate::detect::AgentState::Working;
+
+        server.stream_direct_terminal_agent_status();
+        assert_eq!(
+            read_status(read_server_message(
+                client_control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("working agent status"),
+            )),
+            DirectTerminalAgentStatus {
+                agent: Some("claude".into()),
+                state: DirectTerminalAgentState::Working,
+            }
+        );
+
+        server.stream_direct_terminal_agent_status();
+        assert!(client_control_rx.try_recv().is_err());
+    });
+}
+
+#[test]
 fn direct_terminal_streams_child_keyboard_and_mouse_modes() {
     with_terminal_session_test_server(|server, _other_terminal_id, terminal_id, _pane_id| {
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
