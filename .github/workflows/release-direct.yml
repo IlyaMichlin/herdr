@@ -98,6 +98,35 @@ jobs:
       - name: Remove Zig caches
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
 
+      # Seed Zig's package cache so `zig build` never has to download these
+      # itself. codeberg.org has had DNS outages (NXDOMAIN) that broke the
+      # cross-compiled macOS x86_64 build, which is the only target that needs
+      # translate_c. Try the upstream URL first, then this fork's mirror
+      # release. `zig fetch` recomputes the content hash, so a tampered or
+      # wrong mirror file fails here instead of being used.
+      - name: Seed Zig package cache
+        shell: bash
+        env:
+          MIRROR: https://github.com/${{ github.repository }}/releases/download/herdr-direct-zig-deps
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          while read -r hash url; do
+            file="$tmp/$hash.tar.gz"
+            if ! curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 -o "$file" "$url"; then
+              echo "::warning::upstream download failed for $hash; using mirror"
+              curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 -o "$file" "$MIRROR/$hash.tar.gz"
+            fi
+            got="$(cd vendor/libghostty-vt && zig fetch "$file")"
+            if [ "$got" != "$hash" ]; then
+              echo "::error::hash mismatch for $url: got $got"
+              exit 1
+            fi
+            echo "seeded $hash"
+          done <<'EOF'
+          translate_c-0.0.0-Q_BUWhVNBwDOEcIqub4VFPJPB6D9dgwzUMHTX5KWr8Xr https://codeberg.org/vancluever/translate-c/archive/4e879eb8aba615de112eabd1231ea6e01920cead.tar.gz
+          EOF
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
